@@ -247,25 +247,40 @@ class GmailManager:
 
 def main():
     """Main function to demonstrate Gmail manager usage"""
-    # Initialize the Gmail manager
-    gmail = GmailManager()
-    
-    # Connect to Gmail
-    if gmail.connect():
+    while True:  # Continuous loop
         try:
-            # Get initial trash count
-            trash_count = gmail.get_total_messages('[Gmail]/Trash')
-            if trash_count > 0:
-                print(f"You have {trash_count:,d} messages in your trash")
-                gmail.delete_messages_from_trash(total=trash_count)
+            # Initialize the Gmail manager
+            gmail = GmailManager()
+            
+            # Connect to Gmail
+            if gmail.connect():
+                try:
+                    # Get initial trash count
+                    trash_count = gmail.get_total_messages('[Gmail]/Trash')
+                    if trash_count > 0:
+                        print(f"You have {trash_count:,d} messages in your trash")
+                        gmail.delete_messages_from_trash(total=trash_count)
+                    else:
+                        print("Your trash is empty")
+                            
+                finally:
+                    # Ensure we disconnect properly
+                    gmail.disconnect()
             else:
-                print("Your trash is empty")
-                    
-        finally:
-            # Ensure we disconnect properly
-            gmail.disconnect()
-    else:
-        print("Failed to connect to Gmail")
+                print("Failed to connect to Gmail")
+            
+            # Wait 5 minutes before next run
+            print("\nWaiting 5 minutes before next run...")
+            time.sleep(300)  # 300 seconds = 5 minutes
+            print("\n" + "="*50 + "\n")  # Visual separator between runs
+            
+        except KeyboardInterrupt:
+            print("\nScript stopped by user")
+            break
+        except Exception as e:
+            print(f"\nError in main loop: {str(e)}")
+            print("Retrying in 5 minutes...")
+            time.sleep(300)
 
 if __name__ == "__main__":
     main()
