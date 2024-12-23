@@ -137,107 +137,56 @@ class GmailManager:
                 print("Trash is already empty")
                 return
             
-            print(f"Starting deletion from {datetime.now().strftime('%Y-%m-%d')} going backwards...")
+            print(f"Found {total:,d} messages to delete...")
             deleted_count = 0
             
-            # Use a sliding date window to get messages in smaller chunks
-            end_date = datetime.now()
-            window_size = timedelta(days=1)  # 1-day chunks
-            
-            while True:
-                try:
-                    start_date = end_date - window_size
-                    
-                    # Format dates for IMAP
-                    since_date = start_date.strftime("%d-%b-%Y")
-                    before_date = end_date.strftime("%d-%b-%Y")
-                    
-                    # Search for messages in this date range
-                    search_criteria = f'(BEFORE "{before_date}" SINCE "{since_date}")'
-                    status, messages = self.imap.search(None, search_criteria)
-                    
+            # Create progress bar for overall deletion
+            with tqdm(total=total, desc="Deleting messages", unit='msg') as pbar:
+                while True:
+                    # Search for ALL messages in trash
+                    status, messages = self.imap.search(None, 'ALL')
                     if status != 'OK' or not messages[0]:
-                        # If no messages in this window, move window back
-                        end_date = start_date
-                        if end_date < datetime.now() - timedelta(days=365*10):  # Stop after 10 years back
-                            print("\nReached 10-year limit, stopping search")
-                            break
-                        continue
+                        break
                     
                     message_nums = messages[0].split()[:batch_size]
                     if not message_nums:
-                        end_date = start_date
-                        continue
+                        break
                     
-                    total_in_day = len(messages[0].split())
-                    
-                    # Create progress bar for this date
-                    desc = f"Processing {end_date.strftime('%Y-%m-%d')} ({total_in_day:,d} messages)"
-                    pbar = tqdm(total=total_in_day, desc=desc, unit='msg')
-                    
-                    try:
-                        while message_nums:
-                            # Delete messages in this batch
-                            for num in message_nums:
-                                retry_count = 0
-                                while retry_count < max_retries:
-                                    try:
-                                        self.imap.store(num, '+FLAGS', '\\Deleted')
-                                        deleted_count += 1
-                                        pbar.update(1)
-                                        break  # Success, exit retry loop
-                                        
-                                    except Exception as e:
-                                        retry_count += 1
-                                        if retry_count >= max_retries:
-                                            pbar.write(f"Error on message {num} after {max_retries} retries: {str(e)}")
-                                        else:
-                                            time.sleep(1)  # Wait before retry
-                                            try:
-                                                self.imap.noop()
-                                            except:
-                                                if self.connect():
-                                                    self.imap.select('[Gmail]/Trash', readonly=False)
-                    
-                                time.sleep(0.1)
-                            
-                            # Expunge after each batch
+                    # Delete messages in this batch
+                    for num in message_nums:
+                        retry_count = 0
+                        while retry_count < max_retries:
                             try:
-                                self.imap.expunge()
+                                self.imap.store(num, '+FLAGS', '\\Deleted')
+                                deleted_count += 1
+                                pbar.update(1)
+                                break  # Success, exit retry loop
+                                
                             except Exception as e:
-                                pbar.write(f"Error during expunge: {str(e)}")
-                                if self.connect():
-                                    self.imap.select('[Gmail]/Trash', readonly=False)
-                            
-                            # Get next batch of messages
-                            status, messages = self.imap.search(None, search_criteria)
-                            if status != 'OK' or not messages[0]:
-                                break
-                            message_nums = messages[0].split()[:batch_size]
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    pbar.write(f"Error on message {num} after {max_retries} retries: {str(e)}")
+                                else:
+                                    time.sleep(1)  # Wait before retry
+                                    try:
+                                        self.imap.noop()
+                                    except:
+                                        if self.connect():
+                                            self.imap.select('[Gmail]/Trash', readonly=False)
                 
-                    except Exception as e:
-                        pbar.write(f"\nError processing day {end_date.strftime('%Y-%m-%d')}: {str(e)}")
-                
-                    finally:
-                        pbar.close()
-                
-                    # Move to previous day
-                    end_date = start_date
-                    time.sleep(1)  # Delay between days
+                            time.sleep(0.1)
                     
-                    # Try to reconnect if needed
+                    # Expunge after each batch
                     try:
-                        self.imap.noop()
-                    except:
+                        self.imap.expunge()
+                    except Exception as e:
+                        pbar.write(f"Error during expunge: {str(e)}")
                         if self.connect():
                             self.imap.select('[Gmail]/Trash', readonly=False)
-                
-                except Exception as e:
-                    print(f"\nError on date {end_date.strftime('%Y-%m-%d')}: {str(e)}")
-                    # Move to previous day and continue
-                    end_date = start_date
-                    time.sleep(1)
-                    continue
+                    
+                    # Check if we've deleted everything
+                    if deleted_count >= total:
+                        break
             
             print(f"\nCompleted! Deleted {deleted_count:,d} messages from trash.")
             
