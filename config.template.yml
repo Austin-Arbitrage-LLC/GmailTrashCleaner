@@ -1,0 +1,8 @@
+# Gmail credentials
+email: "your.email@gmail.com"
+password: "your-app-specific-password"
+
+# Cleaning settings
+batch_size: 25  # Number of messages to delete in each batch
+max_retries: 3  # Number of retry attempts for failed operations
+check_interval: 300  # Time in seconds to wait between trash checks (300 = 5 minutes) 
