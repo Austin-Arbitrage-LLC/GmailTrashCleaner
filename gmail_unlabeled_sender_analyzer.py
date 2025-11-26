@@ -25,6 +25,7 @@ import argparse
 import re
 from collections import defaultdict
 from email.utils import parseaddr
+from tqdm import tqdm
 
 
 class GmailUnlabeledSenderAnalyzer:
@@ -100,6 +101,12 @@ class GmailUnlabeledSenderAnalyzer:
         try:
             self.imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
             self.imap.login(self.config['email'], self.config['password'])
+            # Attempt to set a socket timeout to prevent long hangs on FETCH
+            try:
+                if hasattr(self.imap, 'sock') and self.imap.sock:
+                    self.imap.sock.settimeout(30)
+            except Exception:
+                pass
             return True
         except Exception as e:
             print(f"Failed to connect to Gmail: {str(e)}")
@@ -153,10 +160,10 @@ class GmailUnlabeledSenderAnalyzer:
 
     def get_unlabeled_message_uids(self):
         """
-        Get UIDs of messages in inbox that don't have any user labels.
+        Get UIDs of messages in inbox that don't have any user labels and collect sender info.
         
         Returns:
-            list: List of message UIDs that are unlabeled
+            tuple: (list of unlabeled message UIDs, dict of sender counts)
         """
         if not self.imap:
             raise ConnectionError("Not connected to Gmail")
@@ -177,49 +184,84 @@ class GmailUnlabeledSenderAnalyzer:
             
             all_uids = data[0].split()
             unlabeled_uids = []
+            sender_counts = defaultdict(int)  # Collect sender info during first pass
             
             print(f"Scanning {len(all_uids)} messages for unlabeled ones...")
             
-            # Check each message for user labels
-            for i, uid in enumerate(all_uids):
+            # Check each message for user labels and collect sender info
+            for uid in tqdm(all_uids, desc="Processing messages", unit="msg"):
                 try:
-                    # Get labels for this message
-                    status, data = self.imap.uid('FETCH', uid, '(X-GM-LABELS)')
-                    if status != 'OK' or not data or not isinstance(data[0], tuple):
+                    # Get both labels and FROM header in a single FETCH command
+                    status, data = self.imap.uid('FETCH', uid, '(X-GM-LABELS BODY.PEEK[HEADER.FIELDS (FROM RETURN-PATH SENDER)])')
+                    if status != 'OK' or not data:
+                        continue
+                    # Handle both tuple and bytes formats returned by IMAP FETCH
+                    if isinstance(data[0], tuple):
+                        response_payload = data[0][1]
+                    elif isinstance(data[0], (bytes, bytearray)):
+                        response_payload = data[0]
+                    else:
                         continue
                     
-                    # Parse labels from response
-                    labels_data = data[0][1].decode('utf-8', errors='ignore')
+                    response_data = response_payload.decode('utf-8', errors='ignore')
+                    
                     # Extract labels from the response
-                    labels_match = re.search(r'X-GM-LABELS \(([^)]*)\)', labels_data)
+                    labels_match = re.search(r'X-GM-LABELS \(([^)]*)\)', response_data)
+                    message_labels = set()
                     if labels_match:
                         labels_str = labels_match.group(1)
                         # Parse individual labels
-                        message_labels = set()
                         for label in labels_str.split():
                             # Remove quotes and parentheses
                             clean_label = label.strip('"()')
-                            if clean_label and clean_label not in ['\\Inbox', '\\Sent', '\\Draft', '\\Trash', '\\Spam', '\\Important', '\\Starred']:
+                            # Ignore any system label that starts with a backslash (e.g., \Inbox, \Important)
+                            if clean_label and not clean_label.startswith('\\'):
                                 message_labels.add(clean_label)
-                        
-                        # Check if message has any user labels
-                        has_user_label = bool(message_labels & user_labels)
-                        if not has_user_label:
-                            unlabeled_uids.append(uid)
                     
-                    # Progress indicator
-                    if (i + 1) % 100 == 0:
-                        print(f"Progress: {i + 1}/{len(all_uids)} messages scanned", end='\r')
+                    # Extract FROM header from the response
+                    from_match = re.search(r'From:\s*(.+)', response_data, re.IGNORECASE)
+                    sender_email = None
+                    if from_match:
+                        from_field = from_match.group(1).strip()
+                        # Parse email address from the FROM field
+                        name, email = parseaddr(from_field)
+                        if email and '@' in email and '.' in email.split('@')[-1]:
+                            sender_email = email.lower()
+                        else:
+                            # Try other headers if FROM is malformed
+                            return_path_match = re.search(r'Return-Path:\s*(.+)', response_data, re.IGNORECASE)
+                            if return_path_match:
+                                return_path_field = return_path_match.group(1).strip()
+                                name, email = parseaddr(return_path_field)
+                                if email and '@' in email and '.' in email.split('@')[-1]:
+                                    sender_email = email.lower()
+                            
+                            if not sender_email:
+                                sender_match = re.search(r'Sender:\s*(.+)', response_data, re.IGNORECASE)
+                                if sender_match:
+                                    sender_field = sender_match.group(1).strip()
+                                    name, email = parseaddr(sender_field)
+                                    if email and '@' in email and '.' in email.split('@')[-1]:
+                                        sender_email = email.lower()
+                            
+                    
+                    # Check if message has any user labels
+                    has_user_label = bool(message_labels & user_labels)
+                    
+                    if not has_user_label:
+                        unlabeled_uids.append(uid)
+                        # Collect sender info for unlabeled messages
+                        if sender_email:
+                            sender_counts[sender_email] += 1
                         
                 except Exception as e:
                     continue
             
-            print()  # New line after progress
-            return unlabeled_uids
+            return unlabeled_uids, dict(sender_counts)
             
         except Exception as e:
             print(f"Error getting unlabeled messages: {str(e)}")
-            return []
+            return [], {}
 
     def analyze_senders(self, message_uids):
         """
@@ -277,17 +319,14 @@ class GmailUnlabeledSenderAnalyzer:
         
         print("Starting analysis of unlabeled messages in inbox...")
         
-        # Get unlabeled message UIDs
-        unlabeled_uids = self.get_unlabeled_message_uids()
+        # Get unlabeled message UIDs and sender counts in one pass
+        unlabeled_uids, sender_counts = self.get_unlabeled_message_uids()
         
         if not unlabeled_uids:
             print("No unlabeled messages found in inbox.")
             return
         
         print(f"Found {len(unlabeled_uids)} unlabeled messages in inbox.")
-        
-        # Analyze senders
-        sender_counts = self.analyze_senders(unlabeled_uids)
         
         if not sender_counts:
             print("No sender information found.")
